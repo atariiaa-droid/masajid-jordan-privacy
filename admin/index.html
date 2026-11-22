@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>إدارة مساجد الأردن</title>
+<style>
+  :root { --bg:#f4f1ea; --surface:#fff; --ink:#1a2422; --muted:#5f6f6b; --line:#e2ddd2; --brand:#0b3d3a; --brand-2:#12615b; --gold:#c8a24a; --bad:#b03a2e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0d1514; --surface:#15211f; --ink:#eef3f1; --muted:#9db0ab; --line:#24332f; --brand:#0e4a46; --brand-2:#39a89d; --gold:#e0bd67; --bad:#e0705f; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, "Segoe UI", Tahoma, sans-serif; background: var(--bg); color: var(--ink); }
+  header { background: var(--brand); color: #fff; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 18px; margin: 0; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tabs button { flex: 1; }
+  button, .btn { font: inherit; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 10px; padding: 10px 14px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+  button.on, .primary { background: var(--brand-2); color: #fff; border-color: transparent; }
+  .ok { background: var(--brand-2); color: #fff; border-color: transparent; }
+  .no { color: var(--bad); }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 10px; }
+  .card h3 { margin: 0 0 4px; font-size: 16px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .tag { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--gold); color: #1d1606; margin-inline-start: 6px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  input { font: inherit; font-size: 16px; width: 100%; padding: 9px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); margin-top: 8px; }
+  .center { text-align: center; padding: 40px 16px; }
+  #err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header><h1>إدارة مساجد الأردن</h1><span id="who" class="muted" style="color:#cfe"></span></header>
+<main>
+  <div id="login" class="center" hidden>
+    <p>سجّل الدخول بحساب Google الخاص بالإدارة.</p>
+    <button class="primary" id="signin">تسجيل الدخول بـ Google</button>
+  </div>
+  <div id="app" hidden>
+    <div class="tabs">
+      <button id="tPending" class="on">بانتظار الموافقة <span id="cPending"></span></button>
+      <button id="tLive">الموافق عليها <span id="cLive"></span></button>
+    </div>
+    <div id="list"></div>
+    <p class="center"><button id="signout">تسجيل الخروج</button></p>
+  </div>
+  <p id="err"></p>
+</main>
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, onAuthStateChanged, signOut } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
+  import { getFirestore, collection, query, orderBy, onSnapshot, writeBatch, doc, serverTimestamp, deleteDoc } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
+
+  // إعدادات الويب العامة لمشروع Firebase (نفس قيم www/js/config.js)
+  const firebaseConfig = { apiKey: 'AIzaSyAGnktjcZEkKCay1uUbees7YfIOSd8AQQo', authDomain: 'masajid-jordan-f2de1.firebaseapp.com', projectId: 'masajid-jordan-f2de1' };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app), db = getFirestore(app);
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const fmt = t => t?.toDate ? t.toDate().toLocaleString('ar-JO-u-nu-latn', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  const maps = d => `https://www.google.com/maps/search/?api=1&query=${d.la},${d.lo}`;
+  let tab = 'pending', pending = [], live = [], unsub = [];
+
+  $('#signin').onclick = () => signInWithPopup(auth, new GoogleAuthProvider()).catch(e => {
+    if (String(e.code).includes('popup')) signInWithRedirect(auth, new GoogleAuthProvider()); else $('#err').textContent = e.message;
+  });
+  $('#signout').onclick = () => signOut(auth);
+  $('#tPending').onclick = () => { tab = 'pending'; render(); };
+  $('#tLive').onclick = () => { tab = 'live'; render(); };
+
+  onAuthStateChanged(auth, user => {
+    unsub.forEach(u => u()); unsub = [];
+    $('#err').textContent = '';
+    $('#login').hidden = !!user; $('#app').hidden = !user;
+    $('#who').textContent = user ? user.email : '';
+    if (!user) return;
+    const fail = e => { $('#err').textContent = e.code === 'permission-denied' ? 'هذا الحساب ليس حساب الإدارة.' : e.message; };
+    unsub.push(onSnapshot(query(collection(db, 'pending'), orderBy('at', 'desc')), s => { pending = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); }, fail));
+    unsub.push(onSnapshot(query(collection(db, 'live'), orderBy('approvedAt', 'desc')), s => { live = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); }, fail));
+  });
+
+  function render() {
+    $('#tPending').classList.toggle('on', tab === 'pending'); $('#tLive').classList.toggle('on', tab === 'live');
+    $('#cPending').textContent = pending.length ? `(${pending.length})` : '';
+    $('#cLive').textContent = live.length ? `(${live.length})` : '';
+    const arr = tab === 'pending' ? pending : live;
+    if (!arr.length) { $('#list').innerHTML = `<p class="center muted">${tab === 'pending' ? 'ما في اقتراحات جديدة 👍' : 'لسا ما وافقت على شي.'}</p>`; return; }
+    $('#list').innerHTML = arr.map(d => `
+      <div class="card" data-id="${esc(d.id)}">
+        <h3>${esc(d.n)}<span class="tag">${d.type === 'name' ? 'تعديل اسم' : 'مسجد جديد'}</span></h3>
+        <div class="muted">${d.type === 'name' ? `الاسم الحالي: ${esc(d.old || 'بدون اسم')} · ` : ''}${d.a ? `المنطقة: ${esc(d.a)} · ` : ''}${fmt(tab === 'pending' ? d.at : d.approvedAt)}</div>
+        ${tab === 'pending' ? `<input value="${esc(d.n)}" aria-label="الاسم قبل الموافقة">` : ''}
+        <div class="row">
+          <a class="btn" href="${maps(d)}" target="_blank" rel="noopener">افتح المكان على الخريطة</a>
+          ${tab === 'pending'
+            ? `<button class="ok" data-act="ok">موافقة</button><button class="no" data-act="no">رفض</button>`
+            : `<button class="no" data-act="del">إزالة من التطبيق</button>`}
+        </div>
+      </div>`).join('');
+  }
+
+  $('#list').addEventListener('click', async e => {
+    const act = e.target.dataset.act; if (!act) return;
+    const card = e.target.closest('.card'), id = card.dataset.id;
+    e.target.disabled = true;
+    try {
+      if (act === 'ok') {
+        const d = pending.find(x => x.id === id);
+        const n = card.querySelector('input').value.trim() || d.n;
+        const out = { type: d.type, n, la: d.la, lo: d.lo, approvedAt: serverTimestamp() };
+        if (d.a) out.a = d.a; if (d.ref) out.ref = d.ref; if (d.old) out.old = d.old;
+        const b = writeBatch(db);
+        b.set(doc(db, 'live', id), out); b.delete(doc(db, 'pending', id));
+        await b.commit();
+      } else if (act === 'no') {
+        if (!confirm('رفض هذا الاقتراح وحذفه؟')) { e.target.disabled = false; return; }
+        await deleteDoc(doc(db, 'pending', id));
+      } else if (act === 'del') {
+        if (!confirm('إزالته من التطبيق عند كل المستخدمين؟')) { e.target.disabled = false; return; }
+        await deleteDoc(doc(db, 'live', id));
+      }
+    } catch (err) { e.target.disabled = false; $('#err').textContent = err.message; }
+  });
+</script>
+</body>
+</html>
